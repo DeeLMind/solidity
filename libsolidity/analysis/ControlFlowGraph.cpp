@@ -220,19 +220,16 @@ bool ControlFlowParser::visit(IfStatement const& _ifStatement)
 
 	_ifStatement.condition().accept(*this);
 
+	auto nodes = splitFlow<2>();
+	nodes[0] = createFlow(nodes[0], _ifStatement.trueStatement());
+
 	if (_ifStatement.falseStatement())
 	{
-		auto nodes = splitFlow<2>();
-		nodes[0] = createFlow(nodes[0], _ifStatement.trueStatement());
 		nodes[1] = createFlow(nodes[1], *_ifStatement.falseStatement());
 		mergeFlow(nodes);
 	}
 	else
-	{
-		auto nodes = splitFlow<2>();
-		nodes[0] = createFlow(nodes[0], _ifStatement.trueStatement());
 		mergeFlow(nodes, nodes[1]);
-	}
 
 	return false;
 }
@@ -241,17 +238,17 @@ bool ControlFlowParser::visit(ForStatement const& _forStatement)
 {
 	solAssert(!!m_currentNode, "");
 
-	if (auto initializationExpression = _forStatement.initializationExpression())
-		initializationExpression->accept(*this);
+	if (_forStatement.initializationExpression())
+		_forStatement.initializationExpression()->accept(*this);
 
 	auto condition = createLabelHere();
 
-	if (auto conditionExpression = _forStatement.condition())
-		appendControlFlow(*conditionExpression);
+	if (_forStatement.condition())
+		appendControlFlow(*_forStatement.condition());
 
 	auto loopExpression = newLabel();
 	auto nodes = splitFlow<2>();
-	auto& afterFor = nodes[1];
+	auto afterFor = nodes[1];
 	m_currentNode = nodes[0];
 
 	{
@@ -296,8 +293,8 @@ bool ControlFlowParser::visit(WhileStatement const& _whileStatement)
 
 		auto nodes = splitFlow<2>();
 
-		auto& whileBody = nodes[0];
-		auto& afterWhile = nodes[1];
+		auto whileBody = nodes[0];
+		auto afterWhile = nodes[1];
 
 		m_currentNode = whileBody;
 		{
@@ -360,9 +357,8 @@ bool ControlFlowParser::visit(Return const& _return)
 	solAssert(!!m_currentNode, "");
 	solAssert(!!m_cfg.m_currentFunctionFlow, "");
 	solAssert(!!m_cfg.m_currentFunctionFlow->exit, "");
-	// only the first return statement is interesting
-	if (!m_currentNode->block.returnStatement)
-		m_currentNode->block.returnStatement = &_return;
+	solAssert(!m_currentNode->block.returnStatement, "");
+	m_currentNode->block.returnStatement = &_return;
 	connect(m_currentNode, m_cfg.m_currentFunctionFlow->exit);
 	m_currentNode = newLabel();
 	return true;
@@ -387,9 +383,9 @@ bool ControlFlowParser::visitNode(ASTNode const& node)
 	solAssert(!!m_currentNode, "");
 	if (auto const* expression = dynamic_cast<Expression const*>(&node))
 		m_currentNode->block.expressions.emplace_back(expression);
-	if (auto const* variableDeclaration = dynamic_cast<VariableDeclaration const*>(&node))
+	else if (auto const* variableDeclaration = dynamic_cast<VariableDeclaration const*>(&node))
 		m_currentNode->block.variableDeclarations.emplace_back(variableDeclaration);
-	if (auto const* assembly = dynamic_cast<InlineAssembly const*>(&node))
+	else if (auto const* assembly = dynamic_cast<InlineAssembly const*>(&node))
 		m_currentNode->block.inlineAssemblyStatements.emplace_back(assembly);
 
 	return true;
@@ -398,12 +394,15 @@ bool ControlFlowParser::visitNode(ASTNode const& node)
 bool ControlFlowParser::visit(FunctionCall const& _functionCall)
 {
 	solAssert(!!m_currentNode, "");
+	solAssert(!!_functionCall.expression().annotation().type, "");
+
 	if (auto functionType = dynamic_pointer_cast<FunctionType const>(_functionCall.expression().annotation().type))
 		switch (functionType->kind())
 		{
 			case FunctionType::Kind::Revert:
 				solAssert(!!m_cfg.m_currentFunctionFlow, "");
 				solAssert(!!m_cfg.m_currentFunctionFlow->revert, "");
+				_functionCall.expression().accept(*this);
 				ASTNode::listAccept(_functionCall.arguments(), *this);
 				connect(m_currentNode, m_cfg.m_currentFunctionFlow->revert);
 				m_currentNode = newLabel();
@@ -413,6 +412,7 @@ bool ControlFlowParser::visit(FunctionCall const& _functionCall)
 			{
 				solAssert(!!m_cfg.m_currentFunctionFlow, "");
 				solAssert(!!m_cfg.m_currentFunctionFlow->revert, "");
+				_functionCall.expression().accept(*this);
 				ASTNode::listAccept(_functionCall.arguments(), *this);
 				connect(m_currentNode, m_cfg.m_currentFunctionFlow->revert);
 				auto nextNode = newLabel();
@@ -436,6 +436,9 @@ bool CFG::constructFlow(ASTNode const& _astRoot)
 
 bool CFG::visit(ModifierDefinition const& _modifier)
 {
+	solAssert(!m_currentFunctionFlow, "");
+	solAssert(!m_currentModifierFlow, "");
+
 	m_currentModifierFlow = make_shared<ModifierFlow>(newNode(), newNode(), newNode());
 	m_currentModifierFlow->placeholderEntry = newNode();
 	m_currentModifierFlow->placeholderExit = newNode();
@@ -452,6 +455,9 @@ bool CFG::visit(ModifierDefinition const& _modifier)
 
 bool CFG::visit(FunctionDefinition const& _function)
 {
+	solAssert(!m_currentFunctionFlow, "");
+	solAssert(!m_currentModifierFlow, "");
+
 	m_currentFunctionFlow = make_shared<FunctionFlow>(newNode(), newNode(), newNode());
 	m_functionControlFlow[&_function] = m_currentFunctionFlow;
 
@@ -497,56 +503,56 @@ void CFG::applyModifierFlowToFunctionFlow(
 	std::shared_ptr<FunctionFlow> _functionFlow
 )
 {
-	map<CFGNode*, CFGNode*> oldToNew;
+	map<CFGNode*, CFGNode*> copySrcToCopyDst;
 
 	// inherit the revert node of the function
-	oldToNew[_modifierFlow.revert] = _functionFlow->revert;
+	copySrcToCopyDst[_modifierFlow.revert] = _functionFlow->revert;
 
 	// replace the placeholder nodes by the function entry and exit
-	oldToNew[_modifierFlow.placeholderEntry] = _functionFlow->entry;
-	oldToNew[_modifierFlow.placeholderExit] = _functionFlow->exit;
+	copySrcToCopyDst[_modifierFlow.placeholderEntry] = _functionFlow->entry;
+	copySrcToCopyDst[_modifierFlow.placeholderExit] = _functionFlow->exit;
 
-	stack<CFGNode*> nodesToClone;
-	nodesToClone.push(_modifierFlow.entry);
+	stack<CFGNode*> nodesToCopy;
+	nodesToCopy.push(_modifierFlow.entry);
 
 	// map the modifier entry to a new node that will become the new function entry
-	oldToNew[_modifierFlow.entry] = newNode();
+	copySrcToCopyDst[_modifierFlow.entry] = newNode();
 
-	while (!nodesToClone.empty())
+	while (!nodesToCopy.empty())
 	{
-		auto srcNode = nodesToClone.top();
-		nodesToClone.pop();
+		CFGNode* copySrcNode = nodesToCopy.top();
+		nodesToCopy.pop();
 
-		solAssert(oldToNew.count(srcNode), "");
+		solAssert(copySrcToCopyDst.count(copySrcNode), "");
 
-		auto dstNode = oldToNew[srcNode];
+		CFGNode* copyDstNode = copySrcToCopyDst[copySrcNode];
 
-		dstNode->block = srcNode->block;
-		for (auto& entry: srcNode->entries)
+		copyDstNode->block = copySrcNode->block;
+		for (auto const& entry: copySrcNode->entries)
 		{
-			if (!oldToNew.count(entry))
+			if (!copySrcToCopyDst.count(entry))
 			{
-				oldToNew[entry] = newNode();
-				nodesToClone.push(entry);
+				copySrcToCopyDst[entry] = newNode();
+				nodesToCopy.push(entry);
 			}
-			dstNode->entries.emplace_back(oldToNew[entry]);
+			copyDstNode->entries.emplace_back(copySrcToCopyDst[entry]);
 		}
-		for (auto& exit: srcNode->exits)
+		for (auto const& exit: copySrcNode->exits)
 		{
-			if (!oldToNew.count(exit))
+			if (!copySrcToCopyDst.count(exit))
 			{
-				oldToNew[exit] = newNode();
-				nodesToClone.push(exit);
+				copySrcToCopyDst[exit] = newNode();
+				nodesToCopy.push(exit);
 			}
-			dstNode->exits.emplace_back(oldToNew[exit]);
+			copyDstNode->exits.emplace_back(copySrcToCopyDst[exit]);
 		}
 	}
 
 	// if the modifier control flow never reached its exit node,
 	// we need to create a new (disconnected) exit node now
-	if (!oldToNew.count(_modifierFlow.exit))
-		oldToNew[_modifierFlow.exit] = newNode();
+	if (!copySrcToCopyDst.count(_modifierFlow.exit))
+		copySrcToCopyDst[_modifierFlow.exit] = newNode();
 
-	_functionFlow->entry = oldToNew[_modifierFlow.entry];
-	_functionFlow->exit = oldToNew[_modifierFlow.exit];
+	_functionFlow->entry = copySrcToCopyDst[_modifierFlow.entry];
+	_functionFlow->exit = copySrcToCopyDst[_modifierFlow.exit];
 }

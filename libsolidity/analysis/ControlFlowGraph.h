@@ -76,15 +76,15 @@ struct FunctionFlow
 	virtual ~FunctionFlow() {}
 	/// Entry node. Control flow of the function starts here.
 	/// This node is empty and does not have any entries.
-	CFGNode* entry;
+	CFGNode* entry = nullptr;
 	/// Exit node. All non-reverting control flow of the function ends here.
 	/// This node is empty and does not have any exits, but may have multiple entries
 	/// (e.g. all return statements of the function).
-	CFGNode* exit;
+	CFGNode* exit = nullptr;
 	/// Revert node. Control flow of the function in case of revert.
-	/// This node is empty does not have any exists, but may have multiple entries
+	/// This node is empty does not have any exits, but may have multiple entries
 	/// (e.g. all assert, require, revert and throw statements).
-	CFGNode* revert;
+	CFGNode* revert = nullptr;
 };
 
 /** Describes the control flow of a modifier.
@@ -117,11 +117,16 @@ public:
 private:
 	CFGNode* newNode();
 
-	/// Initially the control flow for all functions *without* modifiers and for
+	/// Initially the control flow for all functions *ignoring* modifiers and for
 	/// all modifiers is constructed. Afterwards the control flow of functions
 	/// is adjusted by applying all modifiers.
 	void applyModifiers();
 
+	/// Creates a copy of the modifier flow @a _modifierFlow, while replacing the
+	/// placeholder entry and exit with the function entry and exit, as well as
+	/// replacing the modifier revert node with the function's revert node.
+	/// The resulting control flow is the new function flow with the modifier applied.
+	/// @a _functionFlow is updated in-place.
 	void applyModifierFlowToFunctionFlow(
 		ModifierFlow const& _modifierFlow,
 		std::shared_ptr<FunctionFlow> _functionFlow
