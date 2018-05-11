@@ -277,6 +277,10 @@ bool ControlFlowParser::visit(WhileStatement const& _whileStatement)
 		auto whileBody = createLabelHere();
 
 		{
+			// Note that "continue" in this case currently indeed jumps to whileBody
+			// and not to the condition. This is inconsistent with JavaScript and C and
+			// therefore a bug. This will be fixed in the future (planned for 0.5.0)
+			// and the Control Flow Graph will have to be adjusted accordingly.
 			BreakContinueScope scope(*this, afterWhile, whileBody);
 			appendControlFlow(_whileStatement.body());
 		}
