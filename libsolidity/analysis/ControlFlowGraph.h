@@ -71,8 +71,6 @@ struct CFGNode
 /** Describes the control flow of a function. */
 struct FunctionFlow
 {
-	FunctionFlow(CFGNode* _entry, CFGNode* _exit, CFGNode* _revert):
-		entry(_entry), exit(_exit), revert(_revert) {}
 	virtual ~FunctionFlow() {}
 	/// Entry node. Control flow of the function starts here.
 	/// This node is empty and does not have any entries.
@@ -94,9 +92,6 @@ struct FunctionFlow
  */
 struct ModifierFlow: FunctionFlow
 {
-	template<typename... Args>
-	ModifierFlow(Args&&... args): FunctionFlow(std::forward<Args>(args)...) {}
-
 	/// Control flow leading towards a placeholder exit in placeholderEntry.
 	CFGNode* placeholderEntry = nullptr;
 	/// Control flow coming from a placeholder enter from placeholderExit.
@@ -114,9 +109,14 @@ public:
 	virtual bool visit(FunctionDefinition const& _function) override;
 
 	FunctionFlow const& functionFlow(FunctionDefinition const& _function) const;
-private:
-	CFGNode* newNode();
 
+	class NodeContainer {
+	public:
+		CFGNode* newNode();
+	private:
+		std::vector<std::unique_ptr<CFGNode>> m_nodes;
+	};
+private:
 	/// Initially the control flow for all functions *ignoring* modifiers and for
 	/// all modifiers is constructed. Afterwards the control flow of functions
 	/// is adjusted by applying all modifiers.
@@ -129,26 +129,18 @@ private:
 	/// @a _functionFlow is updated in-place.
 	void applyModifierFlowToFunctionFlow(
 		ModifierFlow const& _modifierFlow,
-		std::shared_ptr<FunctionFlow> _functionFlow
+		FunctionFlow* _functionFlow
 	);
 
 	ErrorReporter& m_errorReporter;
 
-	std::map<FunctionDefinition const*, std::shared_ptr<FunctionFlow>> m_functionControlFlow;
-	std::map<ModifierDefinition const*, std::shared_ptr<ModifierFlow>> m_modifierControlFlow;
-
-	/// List of nodes.
+	/// Node container.
 	/// All nodes allocated during the construction of the control flow graph
-	/// are owned by the CFG class and stored here.
-	std::vector<std::unique_ptr<CFGNode>> m_nodes;
+	/// are owned by the CFG class and stored in this container.
+	NodeContainer m_nodeContainer;
 
-	/// The control flow of the function that is currently parsed.
-	/// Note: this can also be a ModifierFlow
-	std::shared_ptr<FunctionFlow> m_currentFunctionFlow;
-	/// The control flow of the modifier that is currently parsed.
-	std::shared_ptr<ModifierFlow> m_currentModifierFlow;
-
-	friend class ControlFlowParser;
+	std::map<FunctionDefinition const*, std::unique_ptr<FunctionFlow>> m_functionControlFlow;
+	std::map<ModifierDefinition const*, std::unique_ptr<ModifierFlow>> m_modifierControlFlow;
 };
 
 }

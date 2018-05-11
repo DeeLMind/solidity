@@ -33,17 +33,40 @@ namespace solidity
 class ControlFlowParser: private ASTConstVisitor
 {
 public:
-	/// Connects @a _entry and @a _exit by inserting the control flow of @a _node in between.
-	static void createFlowFromTo(CFG& _cfg, CFGNode* _entry, CFGNode* _exit, ASTNode const& _node)
+	static unique_ptr<FunctionFlow> createFunctionFlow(
+		CFG::NodeContainer& _nodeContainer,
+		FunctionDefinition const& _function
+	)
 	{
-		ControlFlowParser parser(_cfg, _entry);
-		parser.appendControlFlow(_node);
-		connect(parser.m_currentNode, _exit);
+		auto functionFlow = unique_ptr<FunctionFlow>(new FunctionFlow());
+		functionFlow->entry = _nodeContainer.newNode();
+		functionFlow->exit = _nodeContainer.newNode();
+		functionFlow->revert = _nodeContainer.newNode();
+		ControlFlowParser parser(_nodeContainer, *functionFlow);
+		parser.appendControlFlow(_function);
+		connect(parser.m_currentNode, functionFlow->exit);
+		return functionFlow;
+	}
+	static unique_ptr<ModifierFlow> createModifierFlow(
+		CFG::NodeContainer& _nodeContainer,
+		ModifierDefinition const& _modifier
+	)
+	{
+		auto modifierFlow = unique_ptr<ModifierFlow>(new ModifierFlow());
+		modifierFlow->entry = _nodeContainer.newNode();
+		modifierFlow->exit = _nodeContainer.newNode();
+		modifierFlow->revert = _nodeContainer.newNode();
+		modifierFlow->placeholderEntry = _nodeContainer.newNode();
+		modifierFlow->placeholderExit = _nodeContainer.newNode();
+		ControlFlowParser parser(_nodeContainer, *modifierFlow);
+		parser.appendControlFlow(_modifier);
+		connect(parser.m_currentNode, modifierFlow->exit);
+		return modifierFlow;
 	}
 
 private:
-	explicit ControlFlowParser(CFG& _cfg, CFGNode* _entry):
-		m_cfg(_cfg), m_currentNode(_entry) {}
+	explicit ControlFlowParser(CFG::NodeContainer& _nodeContainer, FunctionFlow const& _functionFlow):
+		m_nodeContainer(_nodeContainer), m_currentFunctionFlow(_functionFlow), m_currentNode(_functionFlow.entry) {}
 
 	virtual bool visit(BinaryOperation const& _operation) override;
 	virtual bool visit(Conditional const& _conditional) override;
@@ -103,7 +126,7 @@ private:
 		std::array<CFGNode*, n> result;
 		for (auto& node: result)
 		{
-			node = m_cfg.newNode();
+			node = m_nodeContainer.newNode();
 			connect(m_currentNode, node);
 		}
 		m_currentNode = nullptr;
@@ -117,7 +140,7 @@ private:
 	template<size_t n>
 	void mergeFlow(std::array<CFGNode*, n> const& _nodes, CFGNode* _endNode = nullptr)
 	{
-		CFGNode* mergeDestination = (_endNode == nullptr) ? m_cfg.newNode() : _endNode;
+		CFGNode* mergeDestination = (_endNode == nullptr) ? m_nodeContainer.newNode() : _endNode;
 		for (auto& node: _nodes)
 			if (node != mergeDestination)
 				connect(node, mergeDestination);
@@ -126,11 +149,11 @@ private:
 
 	CFGNode* newLabel()
 	{
-		return m_cfg.newNode();
+		return m_nodeContainer.newNode();
 	}
 	CFGNode* createLabelHere()
 	{
-		auto label = m_cfg.newNode();
+		auto label = m_nodeContainer.newNode();
 		connect(m_currentNode, label);
 		m_currentNode = label;
 		return label;
@@ -141,7 +164,12 @@ private:
 		m_currentNode = _node;
 	}
 
-	CFG& m_cfg;
+	CFG::NodeContainer& m_nodeContainer;
+
+	/// The control flow of the function that is currently parsed.
+	/// Note: this can also be a ModifierFlow
+	FunctionFlow const& m_currentFunctionFlow;
+
 	CFGNode* m_currentNode = nullptr;
 
 	/// The current jump destination of break Statements.
@@ -336,9 +364,8 @@ bool ControlFlowParser::visit(Continue const&)
 bool ControlFlowParser::visit(Throw const&)
 {
 	solAssert(!!m_currentNode, "");
-	solAssert(!!m_cfg.m_currentFunctionFlow, "");
-	solAssert(!!m_cfg.m_currentFunctionFlow->revert, "");
-	connect(m_currentNode, m_cfg.m_currentFunctionFlow->revert);
+	solAssert(!!m_currentFunctionFlow.revert, "");
+	connect(m_currentNode, m_currentFunctionFlow.revert);
 	m_currentNode = newLabel();
 	return false;
 }
@@ -359,11 +386,10 @@ void ControlFlowParser::endVisit(Block const&)
 bool ControlFlowParser::visit(Return const& _return)
 {
 	solAssert(!!m_currentNode, "");
-	solAssert(!!m_cfg.m_currentFunctionFlow, "");
-	solAssert(!!m_cfg.m_currentFunctionFlow->exit, "");
+	solAssert(!!m_currentFunctionFlow.exit, "");
 	solAssert(!m_currentNode->block.returnStatement, "");
 	m_currentNode->block.returnStatement = &_return;
-	connect(m_currentNode, m_cfg.m_currentFunctionFlow->exit);
+	connect(m_currentNode, m_currentFunctionFlow.exit);
 	m_currentNode = newLabel();
 	return true;
 }
@@ -372,13 +398,14 @@ bool ControlFlowParser::visit(Return const& _return)
 bool ControlFlowParser::visit(PlaceholderStatement const&)
 {
 	solAssert(!!m_currentNode, "");
-	solAssert(!!m_cfg.m_currentModifierFlow, "");
+	auto modifierFlow = dynamic_cast<ModifierFlow const*>(&m_currentFunctionFlow);
+	solAssert(!!modifierFlow, "");
 
-	connect(m_currentNode, m_cfg.m_currentModifierFlow->placeholderEntry);
+	connect(m_currentNode, modifierFlow->placeholderEntry);
 
 	m_currentNode = newLabel();
 
-	connect(m_cfg.m_currentModifierFlow->placeholderExit, m_currentNode);
+	connect(modifierFlow->placeholderExit, m_currentNode);
 	return false;
 }
 
@@ -404,21 +431,19 @@ bool ControlFlowParser::visit(FunctionCall const& _functionCall)
 		switch (functionType->kind())
 		{
 			case FunctionType::Kind::Revert:
-				solAssert(!!m_cfg.m_currentFunctionFlow, "");
-				solAssert(!!m_cfg.m_currentFunctionFlow->revert, "");
+				solAssert(!!m_currentFunctionFlow.revert, "");
 				_functionCall.expression().accept(*this);
 				ASTNode::listAccept(_functionCall.arguments(), *this);
-				connect(m_currentNode, m_cfg.m_currentFunctionFlow->revert);
+				connect(m_currentNode, m_currentFunctionFlow.revert);
 				m_currentNode = newLabel();
 				return false;
 			case FunctionType::Kind::Require:
 			case FunctionType::Kind::Assert:
 			{
-				solAssert(!!m_cfg.m_currentFunctionFlow, "");
-				solAssert(!!m_cfg.m_currentFunctionFlow->revert, "");
+				solAssert(!!m_currentFunctionFlow.revert, "");
 				_functionCall.expression().accept(*this);
 				ASTNode::listAccept(_functionCall.arguments(), *this);
-				connect(m_currentNode, m_cfg.m_currentFunctionFlow->revert);
+				connect(m_currentNode, m_currentFunctionFlow.revert);
 				auto nextNode = newLabel();
 				connect(m_currentNode, nextNode);
 				m_currentNode = nextNode;
@@ -440,35 +465,13 @@ bool CFG::constructFlow(ASTNode const& _astRoot)
 
 bool CFG::visit(ModifierDefinition const& _modifier)
 {
-	solAssert(!m_currentFunctionFlow, "");
-	solAssert(!m_currentModifierFlow, "");
-
-	m_currentModifierFlow = make_shared<ModifierFlow>(newNode(), newNode(), newNode());
-	m_currentModifierFlow->placeholderEntry = newNode();
-	m_currentModifierFlow->placeholderExit = newNode();
-	m_currentFunctionFlow = std::static_pointer_cast<FunctionFlow>(m_currentModifierFlow);
-	m_modifierControlFlow[&_modifier] = m_currentModifierFlow;
-
-	ControlFlowParser::createFlowFromTo(*this, m_currentFunctionFlow->entry, m_currentFunctionFlow->exit, _modifier);
-
-	m_currentModifierFlow.reset();
-	m_currentFunctionFlow.reset();
-
+	m_modifierControlFlow[&_modifier] = ControlFlowParser::createModifierFlow(m_nodeContainer, _modifier);
 	return false;
 }
 
 bool CFG::visit(FunctionDefinition const& _function)
 {
-	solAssert(!m_currentFunctionFlow, "");
-	solAssert(!m_currentModifierFlow, "");
-
-	m_currentFunctionFlow = make_shared<FunctionFlow>(newNode(), newNode(), newNode());
-	m_functionControlFlow[&_function] = m_currentFunctionFlow;
-
-	ControlFlowParser::createFlowFromTo(*this, m_currentFunctionFlow->entry, m_currentFunctionFlow->exit, _function);
-
-	m_currentFunctionFlow.reset();
-
+	m_functionControlFlow[&_function] = ControlFlowParser::createFunctionFlow(m_nodeContainer, _function);
 	return false;
 }
 
@@ -478,7 +481,7 @@ FunctionFlow const& CFG::functionFlow(FunctionDefinition const& _function) const
 	return *m_functionControlFlow.find(&_function)->second;
 }
 
-CFGNode* CFG::newNode()
+CFGNode* CFG::NodeContainer::newNode()
 {
 	m_nodes.emplace_back(new CFGNode());
 	return m_nodes.back().get();
@@ -495,8 +498,7 @@ void CFG::applyModifiers()
 			))
 			{
 				solAssert(m_modifierControlFlow.count(modifierDefinition), "");
-				auto modifierFlow = m_modifierControlFlow[modifierDefinition];
-				applyModifierFlowToFunctionFlow(*modifierFlow, function.second);
+				applyModifierFlowToFunctionFlow(*m_modifierControlFlow[modifierDefinition], function.second.get());
 			}
 		}
 	}
@@ -504,9 +506,11 @@ void CFG::applyModifiers()
 
 void CFG::applyModifierFlowToFunctionFlow(
 	ModifierFlow const& _modifierFlow,
-	std::shared_ptr<FunctionFlow> _functionFlow
+	FunctionFlow* _functionFlow
 )
 {
+	solAssert(!!_functionFlow, "");
+
 	map<CFGNode*, CFGNode*> copySrcToCopyDst;
 
 	// inherit the revert node of the function
@@ -520,7 +524,7 @@ void CFG::applyModifierFlowToFunctionFlow(
 	nodesToCopy.push(_modifierFlow.entry);
 
 	// map the modifier entry to a new node that will become the new function entry
-	copySrcToCopyDst[_modifierFlow.entry] = newNode();
+	copySrcToCopyDst[_modifierFlow.entry] = m_nodeContainer.newNode();
 
 	while (!nodesToCopy.empty())
 	{
@@ -536,7 +540,7 @@ void CFG::applyModifierFlowToFunctionFlow(
 		{
 			if (!copySrcToCopyDst.count(entry))
 			{
-				copySrcToCopyDst[entry] = newNode();
+				copySrcToCopyDst[entry] = m_nodeContainer.newNode();
 				nodesToCopy.push(entry);
 			}
 			copyDstNode->entries.emplace_back(copySrcToCopyDst[entry]);
@@ -545,7 +549,7 @@ void CFG::applyModifierFlowToFunctionFlow(
 		{
 			if (!copySrcToCopyDst.count(exit))
 			{
-				copySrcToCopyDst[exit] = newNode();
+				copySrcToCopyDst[exit] = m_nodeContainer.newNode();
 				nodesToCopy.push(exit);
 			}
 			copyDstNode->exits.emplace_back(copySrcToCopyDst[exit]);
@@ -555,7 +559,7 @@ void CFG::applyModifierFlowToFunctionFlow(
 	// if the modifier control flow never reached its exit node,
 	// we need to create a new (disconnected) exit node now
 	if (!copySrcToCopyDst.count(_modifierFlow.exit))
-		copySrcToCopyDst[_modifierFlow.exit] = newNode();
+		copySrcToCopyDst[_modifierFlow.exit] = m_nodeContainer.newNode();
 
 	_functionFlow->entry = copySrcToCopyDst[_modifierFlow.entry];
 	_functionFlow->exit = copySrcToCopyDst[_modifierFlow.exit];
