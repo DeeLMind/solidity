@@ -30,6 +30,6 @@ contract C {
     }
 }
 // ----
-// Warning: (87-98): uninitialized storage pointer may be returned
-// Warning: (223-234): uninitialized storage pointer may be returned
-// Warning: (440-451): uninitialized storage pointer may be returned
+// Warning: (87-98): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (223-234): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (440-451): This variable is of storage pointer type and might be returned without assignment.

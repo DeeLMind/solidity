@@ -30,7 +30,35 @@ bool ControlFlowAnalyzer::visit(FunctionDefinition const& _function)
 {
 	auto const& functionFlow = m_cfg.functionFlow(_function);
 	checkUnassignedStorageReturnValues(_function, functionFlow.entry, functionFlow.exit);
-	return ASTConstVisitor::visit(_function);
+	return false;
+}
+
+set<VariableDeclaration const*> ControlFlowAnalyzer::variablesAssignedInNode(CFGNode const *node)
+{
+	set<VariableDeclaration const*> result;
+	for (auto expression: node->block.expressions)
+	{
+		if (auto const* assignment = dynamic_cast<Assignment const*>(expression))
+		{
+			stack<Expression const*> expressions;
+			expressions.push(&assignment->leftHandSide());
+			while (!expressions.empty())
+			{
+				Expression const* expression = expressions.top();
+				expressions.pop();
+
+				if (auto const *tuple = dynamic_cast<TupleExpression const*>(expression))
+					for (auto const& component: tuple->components())
+						expressions.push(component.get());
+				else if (auto const* identifier = dynamic_cast<Identifier const*>(expression))
+					if (auto const* variableDeclaration = dynamic_cast<VariableDeclaration const*>(
+						identifier->annotation().referencedDeclaration
+					))
+						result.insert(variableDeclaration);
+			}
+		}
+	}
+	return result;
 }
 
 void ControlFlowAnalyzer::checkUnassignedStorageReturnValues(
@@ -68,28 +96,9 @@ void ControlFlowAnalyzer::checkUnassignedStorageReturnValues(
 		if (!unassignedAtNode.empty())
 		{
 			// kill all return values to which a value is assigned
-			for (auto expression: node->block.expressions)
-			{
-				if (auto const* assignment = dynamic_cast<Assignment const*>(expression))
-				{
-					stack<Expression const*> expressions;
-					expressions.push(&assignment->leftHandSide());
-					while (!expressions.empty())
-					{
-						Expression const* expression = expressions.top();
-						expressions.pop();
+			for (auto const* variableDeclaration: variablesAssignedInNode(node))
+				unassignedAtNode.erase(variableDeclaration);
 
-						if (auto const *tuple = dynamic_cast<TupleExpression const*>(expression))
-							for (auto const& component: tuple->components())
-								expressions.push(component.get());
-						else if (auto const* identifier = dynamic_cast<Identifier const*>(expression))
-							if (auto const* variableDeclaration = dynamic_cast<VariableDeclaration const*>(
-								identifier->annotation().referencedDeclaration
-							))
-								unassignedAtNode.erase(variableDeclaration);
-					}
-				}
-			}
 			// kill all return values referenced in inline assembly
 			// a reference is enough, checking whether there actually was an assignment might be overkill
 			for (auto assembly: node->block.inlineAssemblyStatements)
@@ -103,14 +112,14 @@ void ControlFlowAnalyzer::checkUnassignedStorageReturnValues(
 			auto& unassignedAtExit = unassigned[exit];
 			auto oldSize = unassignedAtExit.size();
 			unassignedAtExit.insert(unassignedAtNode.begin(), unassignedAtNode.end());
-			// traverse an exit, if we are on a path with new unassigned return values to consider
+			// (re)traverse an exit, if we are on a path with new unassigned return values to consider
 			// this will terminate, since there is only a finite number of unassigned return values
 			if (unassignedAtExit.size() > oldSize)
 				nodesToTraverse.push(exit);
 		}
 	}
 
-	if (unassigned[_functionExit].size() > 0)
+	if (!unassigned[_functionExit].empty())
 	{
 		vector<VariableDeclaration const*> unassignedOrdered(
 			unassigned[_functionExit].begin(),
@@ -123,7 +132,23 @@ void ControlFlowAnalyzer::checkUnassignedStorageReturnValues(
 				return lhs->id() < rhs->id();
 			}
 		);
-		for (auto returnVal: unassignedOrdered)
-			m_errorReporter.warning(returnVal->location(), "uninitialized storage pointer may be returned");
+		for (auto const* returnVal: unassignedOrdered)
+		{
+			SecondarySourceLocation ssl;
+			for (CFGNode* lastNodeBeforeExit: _functionExit->entries)
+				if (unassigned[lastNodeBeforeExit].count(returnVal))
+				{
+					if (!!lastNodeBeforeExit->block.returnStatement)
+						ssl.append("Problematic return:", lastNodeBeforeExit->block.returnStatement->location());
+					else
+						ssl.append("Problematic end of function:", _function.location());
+				}
+
+			m_errorReporter.warning(
+				returnVal->location(),
+				"This variable is of storage pointer type and might be returned without assignment.",
+				ssl
+			);
+		}
 	}
 }

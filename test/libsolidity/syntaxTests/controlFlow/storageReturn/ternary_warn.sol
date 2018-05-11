@@ -9,5 +9,5 @@ contract C {
     }
 }
 // ----
-// Warning: (96-107): uninitialized storage pointer may be returned
-// Warning: (200-211): uninitialized storage pointer may be returned
+// Warning: (96-107): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (200-211): This variable is of storage pointer type and might be returned without assignment.

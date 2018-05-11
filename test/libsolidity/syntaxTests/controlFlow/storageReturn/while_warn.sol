@@ -8,4 +8,4 @@ contract C {
     }
 }
 // ----
-// Warning: (87-98): uninitialized storage pointer may be returned
+// Warning: (87-98): This variable is of storage pointer type and might be returned without assignment.

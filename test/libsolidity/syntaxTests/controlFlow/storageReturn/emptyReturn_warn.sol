@@ -8,8 +8,8 @@ contract C {
     function j() internal view returns (S storage, S storage) { return (s,s); }
 }
 // ----
-// Warning: (87-88): uninitialized storage pointer may be returned
-// Warning: (163-164): uninitialized storage pointer may be returned
-// Warning: (233-234): uninitialized storage pointer may be returned
-// Warning: (316-317): uninitialized storage pointer may be returned
-// Warning: (327-328): uninitialized storage pointer may be returned
+// Warning: (87-88): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (163-164): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (233-234): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (316-317): This variable is of storage pointer type and might be returned without assignment.
+// Warning: (327-328): This variable is of storage pointer type and might be returned without assignment.
